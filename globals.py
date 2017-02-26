@@ -1,11 +1,9 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
-from datastore_classes import RootTeam, Account
-from datetime import date
-import logging
-import jinja2
 import os
+import jinja2
+from datetime import date
 
 JINJA_ENVIRONMENT = jinja2.Environment(
     loader=jinja2.FileSystemLoader(os.path.dirname(__file__)),
@@ -15,7 +13,6 @@ JINJA_ENVIRONMENT = jinja2.Environment(
 year = "2014"  # Used by tba api calls
 first_event_wednesday = date(2014, 2, 26)  # used to convert timestamps to week numbers
 mechanize_timeout = 30.0  # Seconds to wait for mechanize to gather data from tba
-debug_current_editable_week = 3  # Allow editing of this week and all weeks after this
 overestimate_of_frc_teams = 6000  # Makes getting all the teams in FRC slightly more efficient
 
 draft_rounds = 5  # Number of rounds in a particular draft
@@ -39,9 +36,6 @@ league_points_per_win = 2
 league_points_per_tie = 1
 league_points_per_loss = 0
 league_points_per_bye = 0
-
-#Used as the name of a league to indicate that the league name and leave league button should not be displayed
-draft_started_sentinel = "f35f0a1295224ac2a1d21c8ce9768a70" #UUID generated from uuidgenerator.net
 
 #The character used to denote a bye week in schedules
 schedule_bye_week = '0'
@@ -90,13 +84,57 @@ def get_team_list_per_event(event_id):
     return team_numbers
 
 def get_or_create_account(user):
-    """Called periodically to get (all pages) to get the current user, or to create a new one if null"""
+    """Called periodically (all pages) to get the current user, or to create a new one if null"""
     account = Account.get_or_insert(user.user_id(), nickname=user.nickname(), league='0')
-    if account.league == None:
+    if not account.league:  # Makes compiler happy. Equivalent to "if account.league == None:"
         account.league = '0'
         account.put()
     return account
 
-def display_error_page(self, referer, message):
+def display_error_page(self, referrer, message):
     template = JINJA_ENVIRONMENT.get_template('templates/error_page.html')
-    self.response.write(template.render({'Message': message, 'Back_Link': referer}))
+    self.response.write(template.render({'Message': message, 'Back_Link': referrer}))
+
+def get_current_editable_week():
+    global_settings = GlobalSettings.get_or_insert('0', editable_week=None)
+    if not global_settings.editable_week:
+        global_settings.editable_week = 1
+        global_settings.put()
+    return global_settings.editable_week
+
+def set_current_editable_week(week_num):
+    global_settings = GlobalSettings.get_or_insert('0')
+    global_settings.editable_week = week_num
+    global_settings.put()
+
+
+def display_league_standings(account_entity):
+    league_id = account_entity.league
+    if get_draft_state(account_entity) == -1:
+        league_points_total = 0
+        players = Account.query(Account.league == league_id).fetch()
+        for player in players:
+            league_points_total += get_league_points(player.key.id())
+        return league_points_total != 0
+    else:
+        return False
+
+
+def get_draft_state(account_entity):
+    league_id = account_entity.league
+    league = league_key(league_id).get()
+    if is_league_owner(account_entity) and league.draft_current_position == 0:
+        return -10
+    else:
+        if league:
+            return league.draft_current_position
+        else:
+            return 0
+
+
+def is_league_owner(account_entity):
+    return account_entity.league == account_entity.key.id()
+
+
+from datastore_classes import RootTeam, Account, GlobalSettings, League, league_key
+from league_management import get_league_points

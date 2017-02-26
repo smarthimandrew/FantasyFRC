@@ -10,14 +10,11 @@ from random import shuffle
 import datetime
 import calendar
 
-import globals
-from globals import get_team_list, maximum_roster_size, maximum_active_teams
-
 from google.appengine.ext.webapp.util import run_wsgi_app
 from google.appengine.ext import ndb
 from google.appengine.api import users
 
-from datastore_classes import RootTeam, league_key, Choice, Lineup, choice_key, account_key, Account, lineup_key, \
+from datastore_classes import RootTeam, root_team_key, league_key, Choice, Lineup, choice_key, account_key, Account, lineup_key, \
     DraftPick, draft_pick_key
 
 import jinja2
@@ -327,12 +324,13 @@ def get_max_free_agent_pages(league_id):
         return math.floor(number_of_teams / globals.free_agent_pagination) + 1
 
 
-def get_free_agent_list(league_id, page):
+def get_free_agent_list(league_id, page, account_id):
     """
         Return the list of free agents for a given league. Only return those on a certain page
 
         :param league_id: The league to generate the list for
         :param page: The number of the page to get
+        :param account_id: The account id of the person viewing this page
         :return: A list of dictionaries with the following information for each team:
             - rank: Rank in the free agent list
             - name: The name of the team
@@ -358,11 +356,31 @@ def get_free_agent_list(league_id, page):
             'rank': i + ((page - 1) * globals.free_agent_pagination) + 1,
             'name': team.name,
             'number': team.key.id(),
-            'total_points': team.total_points
+            'total_points': team.total_points,
+            'on_watchlist': int(team.key.id()) in account_key(account_id).get().watchlist
         })
 
     return free_agent_list
 
+def get_watchlist(watchlist_raw):
+    watch_list = []
+    for team_number in watchlist_raw:
+        logging.info(team_number)
+        team = root_team_key(str(team_number)).get()
+        choice_query = Choice.query(Choice.current_team_roster == team_number)
+        choice_entity = choice_query.fetch(1)
+        if len(choice_entity) > 0:
+            owner = choice_entity[0].key.parent().get()
+            name = owner.nickname
+        else:
+            name = "Unowned"
+        watch_list.append({
+            'name': team.name,
+            'number': team_number,
+            'total_points': team.total_points,
+            'owner': name
+        })
+    return watch_list
 
 class FreeAgentListPage(webapp2.RequestHandler):
     def get(self, page):
@@ -392,20 +410,21 @@ class FreeAgentListPage(webapp2.RequestHandler):
             else:
                 page = int(page)
 
-            if league_key(league_id).get().draft_current_position == 0:
-                league_name = league_key(league_id).get().name
-            else:
-                league_name = globals.draft_started_sentinel
+            league_name = league_key(league_id).get().name
 
-            free_agent_list = get_free_agent_list(league_id, page)
+            free_agent_list = get_free_agent_list(league_id, page, account.key.id())
+
+            current_roster = get_current_roster(account.key.id())
 
             #Send html data to browser
             template_values = {
                 'user': user.nickname(),
                 'logout_url': logout_url,
                 'league_name': league_name,
+                'draft_state': globals.get_draft_state(account),
                 'update_text': update_text,
                 'free_agent_list': free_agent_list,
+                'roster': current_roster,
                 'page': page,
                 'max_page': get_max_free_agent_pages(league_id),
             }
@@ -414,6 +433,103 @@ class FreeAgentListPage(webapp2.RequestHandler):
 
         else:
             globals.display_error_page(self, self.request.referer, error_messages.need_to_be_a_member_of_a_league)
+
+    def handle_exception(self, exception, debug_mode):
+        if debug_mode:
+            super(type(self), self).handle_exception(exception, debug_mode)
+        else:
+            template = JINJA_ENVIRONMENT.get_template('templates/500.html')
+            self.response.write(template.render())
+
+
+class WatchListPage(webapp2.RequestHandler):
+    def get(self):
+        """
+            Display the watchlist for this user
+
+            The watch list is a list of teams that the player has selected to keep tabs on.
+            They are sorted by the total points of each team
+            Users have the option to pick up teams or remove them from the watchlist
+        """
+        # Checks for active Google account session
+        user = users.get_current_user()
+
+        logout_url = users.create_logout_url('/')
+
+        #Display update text for the status of the last choice update
+        update_text = self.request.get('updated')
+
+        account = globals.get_or_create_account(user)
+        league_id = account.league
+
+        if league_id != '0':
+            league_name = league_key(league_id).get().name
+
+            watchlist_raw = account.watchlist
+
+            watch_list = get_watchlist(watchlist_raw);
+
+            current_roster = get_current_roster(account.key.id())
+
+            #Send html data to browser
+            template_values = {
+                'user': user.nickname(),
+                'logout_url': logout_url,
+                'league_name': league_name,
+                'draft_state': globals.get_draft_state(account),
+                'update_text': update_text,
+                'watch_list': watch_list,
+                'roster': current_roster,
+            }
+            template = JINJA_ENVIRONMENT.get_template('templates/watchlist.html')
+            self.response.write(template.render(template_values))
+
+        else:
+            globals.display_error_page(self, self.request.referer, error_messages.need_to_be_a_member_of_a_league)
+
+    def handle_exception(self, exception, debug_mode):
+        if debug_mode:
+            super(type(self), self).handle_exception(exception, debug_mode)
+        else:
+            template = JINJA_ENVIRONMENT.get_template('templates/500.html')
+            self.response.write(template.render())
+
+
+class UpdateWatchlist(webapp2.RequestHandler):
+    def get(self):
+        """
+            Update the watchlist for the user
+            Expects a post parameter: 'action' to be one of the following:
+                - add: Adds the team to the watchlist
+                - drop: Removes the team from the watchlist
+            Expects a post parameter: 'team_number' to be the number of the team to perform this action on
+        """
+        action = self.request.get('action')
+        team_number = self.request.get('team')
+
+        user = users.get_current_user()
+
+        account = globals.get_or_create_account(user)
+
+        watchlist = account.watchlist
+
+        if action == "add":
+            if not int(team_number) in watchlist:
+                account.watchlist.append(int(team_number))
+                account.put()
+        elif action == "drop":
+            if int(team_number) in watchlist:
+                account.watchlist.remove(int(team_number))
+                account.put()
+
+        self.redirect(self.request.referer)
+
+    def handle_exception(self, exception, debug_mode):
+        if debug_mode:
+            super(type(self), self).handle_exception(exception, debug_mode)
+        else:
+            template = JINJA_ENVIRONMENT.get_template('templates/500.html')
+            self.response.write(template.render())
 
 
 class Draft_Page(webapp2.RequestHandler):
@@ -462,31 +578,34 @@ class Draft_Page(webapp2.RequestHandler):
                 player_list.append(player.nickname)
 
             number_of_picks = len(league_players) * globals.draft_rounds
+            last_draft_round = 9999
             for position in range(1, number_of_picks + 1):
-                pick_query = DraftPick.query().filter(DraftPick.display_number == position)
-                query_results = pick_query.fetch(1)
-                pick = DraftPick()
-                if len(query_results) != 0:
-                    pick = query_results[0]
+                pick = draft_pick_key(league_key(league_id), position).get()
+                player_ids_in_order = []
+                for player in league_players:
+                    player_ids_in_order.append(player.key.id())
+                if pick:
+                    current_id = ndb.Key(urlsafe=pick.player).id()
+                    username = player_ids_in_order.index(current_id)
+                else:
+                    username = (((position % len(league_players)) - 1) % len(league_players))
 
-                username = (((position % len(league_players)) - 1) % len(league_players))
                 draft_round = int((position - 1) / len(league_players))
-                if username == 0:
+
+                if draft_round != last_draft_round:
                     draft_board.append([])
                     for i in range(0, len(league_players)):
                         draft_board[draft_round].append('-')
-                if pick and pick.team != None:
+                if pick and pick.team:
                     draft_board[draft_round][username] = str(pick.team)
                     if pick.team == 0:
                         draft_board[draft_round][username] = "<i>Forfeited</i>"
                 else:
                     draft_board[draft_round][username] = "<i>TBD</i>"
+                last_draft_round = draft_round
 
             if league_id != '0':
-                if league_key(league_id).get().draft_current_position == 0:
-                    league_name = league_key(league_id).get().name
-                else:
-                    league_name = globals.draft_started_sentinel
+                league_name = league_key(league_id).get().name
             else:
                 league_name = ""
 
@@ -520,6 +639,7 @@ class Draft_Page(webapp2.RequestHandler):
                 'player_list': player_list,
                 'update_text': update_text,
                 'league_name': league_name,
+                'draft_state': globals.get_draft_state(account),
                 'users_turn': users_turn,
                 'picking_user': picking_user,
                 'current_unix_timeout': current_unix_timeout,
@@ -530,6 +650,13 @@ class Draft_Page(webapp2.RequestHandler):
             self.response.write(template.render(template_values))
         else:
             globals.display_error_page(self, self.request.referer,error_messages.need_to_be_a_member_of_a_league)
+
+    def handle_exception(self, exception, debug_mode):
+        if debug_mode:
+            super(type(self), self).handle_exception(exception, debug_mode)
+        else:
+            template = JINJA_ENVIRONMENT.get_template('templates/500.html')
+            self.response.write(template.render())
 
 
 class Start_Draft(webapp2.RequestHandler):
@@ -563,6 +690,13 @@ class Start_Draft(webapp2.RequestHandler):
                 globals.display_error_page(self, self.request.referer, error_messages.league_too_small)
         else:
             globals.display_error_page(self, self.request.referer,error_messages.access_denied)
+
+    def handle_exception(self, exception, debug_mode):
+        if debug_mode:
+            super(type(self), self).handle_exception(exception, debug_mode)
+        else:
+            template = JINJA_ENVIRONMENT.get_template('templates/500.html')
+            self.response.write(template.render())
 
 
 class Submit_Draft_Pick(webapp2.RequestHandler):
@@ -612,73 +746,12 @@ class Submit_Draft_Pick(webapp2.RequestHandler):
         #Display the draft main page with status
         self.redirect('/draft/?updated=' + selection_error)
 
-
-class Pick_up_Page(webapp2.RequestHandler):
-    """
-        Allows a user to pick up a single team after the draft has completed
-    """
-    def get(self):
-        # Checks for active Google account session
-        user = users.get_current_user()
-
-        #Force user login
-        if user is None:
-            self.redirect(users.create_login_url(self.request.uri))
+    def handle_exception(self, exception, debug_mode):
+        if debug_mode:
+            super(type(self), self).handle_exception(exception, debug_mode)
         else:
-            #Current user's id, used to identify their data
-            user_id = user.user_id()
-            logout_url = users.create_logout_url('/')
-
-            account = globals.get_or_create_account(user)
-            league_id = account.league
-
-            #Get user's choices for the current league
-            find_choice_key = choice_key(account_key(user_id), str(league_id))
-            found_choice = find_choice_key.get()
-
-            #Display update text for the status of the last choice update
-            update_text = self.request.get('updated')
-            if self.request.get('updated') == "Good":
-                update_text = "Team added successfully"
-
-            #Display the user's current roster
-            user_roster = []
-            if found_choice:
-                user_roster = found_choice.current_team_roster
-
-
-            #Get list of players in the league and their choices
-            league_table = [{'player_team': 'Roster', 'player_name': 'Player'}]
-            league_player_query = Account.query(Account.league == league_id)
-            league_players = league_player_query.fetch()  #league_player_query.order(Account.nickname).fetch()
-            for player in league_players:
-                choice = choice_key(account_key(player.key.id()), league_id).get()
-                if choice:
-                    league_table.append(
-                        {'player_team': str(choice.current_team_roster), 'player_name': player.nickname})
-                else:
-                    league_table.append({'player_team': 'None', 'player_name': player.nickname})
-
-            if league_id != '0':
-                if league_key(league_id).get().draft_current_position == 0:
-                    league_name = league_key(league_id).get().name
-                else:
-                    league_name = globals.draft_started_sentinel
-            else:
-                league_name = ""
-
-            #Send html data to browser
-            template_values = {
-                'user': user.nickname(),
-                'logout_url': logout_url,
-                'update_text': update_text,
-                'league_table': league_table,
-                'league_name': league_name,
-                'roster': user_roster,
-                'default_team': self.request.get('team'),
-            }
-            template = JINJA_ENVIRONMENT.get_template('templates/pick_up_main.html')
-            self.response.write(template.render(template_values))
+            template = JINJA_ENVIRONMENT.get_template('templates/500.html')
+            self.response.write(template.render())
 
 
 class Submit_Pick(webapp2.RequestHandler):
@@ -740,19 +813,33 @@ class Submit_Pick(webapp2.RequestHandler):
                 str(post_Choice.put())
             else:
                 selection_error = "You have reached the maximum capacity for teams on your roster"
-            #             close_draft(post_Choice_key.parent().get().league)
 
-        #Display the homepage
-        self.redirect('/draft/pickUp/?updated=' + selection_error)
+        #Send them back to the previous page
+        self.redirect(str(self.request.referer.split('?', 1)[0] + '?updated=' + selection_error))
+
+    def handle_exception(self, exception, debug_mode):
+        if debug_mode:
+            super(type(self), self).handle_exception(exception, debug_mode)
+        else:
+            template = JINJA_ENVIRONMENT.get_template('templates/500.html')
+            self.response.write(template.render())
+
+
+class PageNotFoundHandler(webapp2.RequestHandler):
+    def get(self):
+        self.error(404)
+        template = JINJA_ENVIRONMENT.get_template('templates/404.html')
+        self.response.write(template.render())
 
 
 application = webapp2.WSGIApplication([('/draft/freeAgentList/(.*)', FreeAgentListPage),  # Page number
                                        ('/draft/pickUp/submitPick', Submit_Pick),
-                                       ('/draft/pickUp/', Pick_up_Page),
                                        ('/draft/submitPick', Submit_Draft_Pick),
                                        ('/draft/startDraft', Start_Draft),
-                                       ('/draft/', Draft_Page)
-
+                                       ('/draft/watchList/update/', UpdateWatchlist),
+                                       ('/draft/watchList', WatchListPage),
+                                       ('/draft/', Draft_Page),
+                                       ('/draft/.*', PageNotFoundHandler)
                                       ], debug=True)
 
 
@@ -763,3 +850,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+from alliance_management import get_current_roster
+from globals import get_team_list, maximum_roster_size, maximum_active_teams
+import globals

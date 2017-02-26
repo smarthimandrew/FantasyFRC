@@ -46,10 +46,7 @@ class About(webapp2.RequestHandler):
 
             #Proccess the league info
             if league_id != '0':
-                if league_key(league_id).get().draft_current_position == 0:
-                    league_name = league_key(league_id).get().name
-                else:
-                    league_name = globals.draft_started_sentinel
+                league_name = league_key(league_id).get().name
             else:
                 league_name = ""
 
@@ -57,10 +54,18 @@ class About(webapp2.RequestHandler):
             template_values = {
                         'user': user.nickname(),
                         'logout_url': logout_url,
-                        'league_name': league_name
+                        'league_name': league_name,
+                        'draft_state': globals.get_draft_state(account),
                         }
             template = JINJA_ENVIRONMENT.get_template('templates/about.html')
             self.response.write(template.render(template_values))
+
+    def handle_exception(self, exception, debug_mode):
+        if debug_mode:
+            super(type(self), self).handle_exception(exception, debug_mode)
+        else:
+            template = JINJA_ENVIRONMENT.get_template('templates/500.html')
+            self.response.write(template.render())
 
 
 application = webapp2.WSGIApplication([

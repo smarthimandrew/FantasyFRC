@@ -13,36 +13,51 @@
     <ul class="nav nav-tabs" role="tablist">
         <li role="presentation" class="active"><a href="#league" aria-controls="league" role="tab" data-toggle="tab">My League</a> </li>
         <li role="presentation"><a href="#alliance" aria-controls="alliance" role="tab" data-toggle="tab">My Alliance</a> </li>
+        <li role="presentation"><a href="#watchlist" aria-controls="watchlist" role="tab" data-toggle="tab">My Watchlist</a> </li>
+
     </ul>
 
     <div class="tab-content">
         <div role="tabpanel" class="tab-pane" id="alliance">
-            <h1>My Roster</h1>
-            <table class="table">
-                <tr><td></td><td>Number</td><td>Name</td><td>Drop</td><td>Total Points</td></tr>
-                {% for team in roster %}
-                    <tr>
-                        <td>
-                            {% if team.disabled == "True" %}
-                                <a class="category-tooltip" href="#" data-toggle="tooltip"
-								data-original-title="This team is unable to be dropped because of its presence in the top 5">
-                                    <img src="/static/icons/lock.png" alt="Team Locked"/>
-                                </a>
-                            {% endif %}
-                        </td>
-                        <td><a href="{{ team.detail_url }}">{{ team.number }}</a></td>
-                        <td><a href="{{ team.detail_url }}">{{ team.name }}</a></td>
-                        <td>
-                            <a href="#"  data-toggle="modal" data-target="#drop_team_modal_{{ team.number }}">
-                            <img src="/static/icons/delete.png" alt="Drop Team"/> Drop</a>
-                        </td>
-                        <td><a href="{{ team.detail_url }}">{{ team.total_points }}</a></td>
-                    </tr>
-                {% endfor %}
-            </table>
-            <h1>My Schedule</h1>
+            <h2>My Roster</h2>
+                {% if roster|length > 0%}
+                    <table class="table">
+                        <tr><td></td><td>Number</td><td>Name</td><td>Drop</td><td>Total Points</td></tr>
+                        {% for team in roster %}
+                            <tr>
+                                <td>
+                                    {% if team.disabled == "True" %}
+                                        <a class="category-tooltip" href="#" data-toggle="tooltip"
+                                        data-original-title="This team is unable to be dropped because of its presence in the top 5">
+                                            <img src="/static/icons/lock.png" alt="Team Locked"/>
+                                        </a>
+                                    {% endif %}
+                                </td>
+                                <td><a href="{{ team.detail_url }}">{{ team.number }}</a></td>
+                                <td><a href="{{ team.detail_url }}">{{ team.name }}</a></td>
+                                <td>
+                                    {% if team.disabled == 'True' %}
+                                        <a class="category-tooltip" href="#" data-toggle="tooltip"
+                                            data-original-title="This team is unable to be dropped because of its presence in the top 5">
+                                        <span href="" class="text-disabled"> Drop</span>
+                                    {% else %}
+                                        <a href="#"  data-toggle="modal" data-target="#drop_team_modal_{{ team.number }}">
+                                        <img src="/static/icons/delete.png" alt="Drop Team"/> Drop</a>
+                                    {% endif %}
+                                </td>
+                                <td><a href="{{ team.detail_url }}">{{ team.total_points }}</a></td>
+                            </tr>
+                        {% endfor %}
+                    </table>
+                    You can add more teams to your alliance via the <a href="/draft/freeAgentList/">free agent list</a>.
+                {% else %}
+                    There are no teams on your roster. Add some via the <a href="/draft/freeAgentList/">free agent list</a>.
+                {% endif %}
+
+            <h2>My Schedule</h2>
             <div>
             <table class="table" style="width: auto !important">
+                <tr><td>Week</td><td>Opponent</td></tr>
                 {% for opponent in user_schedule %}
                     <tr>
                         <td>
@@ -57,7 +72,7 @@
                     </tr>
                 {% endfor %}
             </table></div>
-            <h1>Lineup Overview</h1>
+            <h2>Lineup Overview</h2>
             <table class="table">
                 <tr><td>Week</td><td>Active Teams</td><td>Points</td></tr>
                 {% for week in week_table %}
@@ -79,7 +94,7 @@
             </table>
         </div>
         <div role="tabpanel" class="tab-pane active" id="league">
-            <h1>League Standings</h1>
+            <h2>League Standings</h2>
             <table class="table">
                 <tr><td>Rank</td><td>Name</td><td>W-L-T</td><td>Total Points</td></tr>
                     {% for player in leader_board %}
@@ -94,7 +109,7 @@
 
                     {% endfor %}
             </table>
-            <h1>League Schedule</h1>
+            <h2>League Schedule</h2>
             <table class="table">
                 <tr>
                     <td>Player</td>
@@ -111,6 +126,23 @@
                     </tr>
                 {% endfor %}
             </table>
+        </div>
+        <div role="tabpanel" class="tab-pane" id="watchlist">
+            <h3>Sorted by Points</h3>
+            <table class="table">
+                <tr><td>Number</td><td>Name</td><td>Current Owner</td><td>Actions</td><td>Total Points</td></tr>
+                {% for team in watch_list %}
+                <tr>
+                    <td><a href="/allianceManagement/teamDetail/{{ team.number }}">{{ team.number }}</a></td>
+                    <td>{{ team.name }}</td>
+                    <td>{{ team.owner }}</td>
+                    <td><a href="/draft/pickUp/submitPick?team={{ team.number }}"><img src="/static/icons/add.png"></a>
+                        <a href="/draft/watchList/update/?action=drop&team={{ team.number }}"><img src="/static/icons/flag_blue_delete.png"></a></td>
+                    <td>{{ team.total_points }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            Manage watchlist <a href="/draft/watchList">here</a>.
         </div>
     </div>
 </div>

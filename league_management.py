@@ -9,8 +9,7 @@ from google.appengine.ext.webapp.util import run_wsgi_app
 from google.appengine.api import users
 from google.appengine.ext import ndb
 
-import globals
-from datastore_classes import account_key, Account, League, Choice, choice_key, league_key, Lineup, DraftPick
+from datastore_classes import account_key, Account, League, Choice, choice_key, league_key, Lineup, lineup_key, DraftPick
 
 import jinja2
 import webapp2
@@ -140,7 +139,7 @@ def get_leader_board(league_id):
 
 def finish_week(league_id, past_week_num):
     """
-        Preform the operations necessary to move on to the next week
+        Preform the operations necessary to move on to the next week. Called around Monday-ish
 
         :param league_id: The league to finish
         :param past_week_num: The week number to finish
@@ -151,7 +150,7 @@ def finish_week(league_id, past_week_num):
     league_player_query = Account.query(Account.league == league_id)
     league_players = league_player_query.fetch()
     for player in league_players:
-        opponent = player.schedule[past_week_num - 1]  # -1 for conversion to 0 based index
+        opponent = get_opponent(player.key.id(), past_week_num)
         if opponent != globals.schedule_bye_week:
             opponent_points = get_total_week_points(opponent, past_week_num)
             player_points = get_total_week_points(player.key.id(), past_week_num)
@@ -172,6 +171,26 @@ def finish_week(league_id, past_week_num):
             player.record[past_week_num - 1] = globals.record_bye  # -1 for conversion to 0 based index
         player.put()
 
+def run_week_begin(begin_week_num):
+    """
+        Called around Wednesday-ish. Starts things off for a new competition week
+
+        This function:
+            - restricts editing to the previous week
+            - Seals rosters in the books so benches and such will work correctly
+    """
+
+    #Seal rosters
+    all_choice_entities = Choice.query().fetch()
+    for choice in all_choice_entities:
+        lineup_object = lineup_key(choice.key, begin_week_num).get()
+        roster = choice.current_team_roster
+        for team_number in roster:
+            lineup_object.weekly_roster.append(team_number)
+
+    #Restrict editing
+    globals.set_current_editable_week(int(begin_week_num) + 1)
+
 
 def remove_from_league(user_id):
     """
@@ -181,6 +200,17 @@ def remove_from_league(user_id):
     account = Account.get_or_insert(user_id)
 
     if league_key(account.league).get() and league_key(account.league).get().draft_current_position == 0:
+        remove_from_league_indiscriminately(user_id)
+
+def remove_from_league_indiscriminately(user_id):
+    """
+        Remove a certain user_id from their league, doesn't care if the draft has already started
+        To be called directly only on the destruction of a league
+    """
+    #Current user's id, used to identify their data
+    account = Account.get_or_insert(user_id)
+
+    if league_key(account.league).get():
         #Remove user's choices and lineup for the league
         choice = choice_key(account_key(user_id), account.league).get()
         if choice:
@@ -253,18 +283,16 @@ class Show_Leagues(webapp2.RequestHandler):
             commissioner = "None"
             if account_key(league.key.id()).get():
                 commissioner = account_key(league.key.id()).get().nickname
-            league_output.append({'name': league.name,
-                                  'id': league.key.id(),
-                                  'size': number_of_players,
-                                  'commissioner': commissioner,
-                                  'join_url': '/leagueManagement/joinLeague/' + league.key.id()
-                                  })
+            if league.key.id() != '0':
+                league_output.append({'name': league.name,
+                                      'id': league.key.id(),
+                                      'size': number_of_players,
+                                      'commissioner': commissioner,
+                                      'join_url': '/leagueManagement/joinLeague/' + league.key.id()
+                                      })
 
         if league_id != '0':
-            if league_key(league_id).get().draft_current_position == 0:
-                league_name = league_key(league_id).get().name
-            else:
-                league_name = globals.draft_started_sentinel
+            league_name = league_key(league_id).get().name
         else:
             league_name = ""
 
@@ -273,10 +301,19 @@ class Show_Leagues(webapp2.RequestHandler):
                         'user': user.nickname(),
                         'logout_url': logout_url,
                         'league_list': league_output,
-                        'league_name': league_name
+                        'league_name': league_name,
+                        'draft_state': globals.get_draft_state(account),
                         }
         template = JINJA_ENVIRONMENT.get_template('templates/league_list.html')
         self.response.write(template.render(template_values))
+
+    def handle_exception(self, exception, debug_mode):
+        if debug_mode:
+            super(type(self), self).handle_exception(exception, debug_mode)
+        else:
+            template = JINJA_ENVIRONMENT.get_template('templates/500.html')
+            self.response.write(template.render())
+
 
 class create_League(webapp2.RequestHandler):
     """
@@ -292,10 +329,7 @@ class create_League(webapp2.RequestHandler):
         league_id = account.league
 
         if league_id != '0':
-            if league_key(league_id).get().draft_current_position == 0:
-                league_name = league_key(league_id).get().name
-            else:
-                league_name = globals.draft_started_sentinel
+            league_name = league_key(league_id).get().name
         else:
             league_name = ""
 
@@ -303,14 +337,23 @@ class create_League(webapp2.RequestHandler):
         template_values = {
                         'user': user.nickname(),
                         'logout_url': logout_url,
-                        'league_name': league_name
+                        'league_name': league_name,
+                        'draft_state': globals.get_draft_state(account),
                         }
         template = JINJA_ENVIRONMENT.get_template('templates/create_league.html')
         self.response.write(template.render(template_values))
 
+    def handle_exception(self, exception, debug_mode):
+        if debug_mode:
+            super(type(self), self).handle_exception(exception, debug_mode)
+        else:
+            template = JINJA_ENVIRONMENT.get_template('templates/500.html')
+            self.response.write(template.render())
+
+
 class update_League(webapp2.RequestHandler):
     """
-        The post handler for the creation of new leagues
+        The post handler for the creation and update of leagues
     """
     def post(self):
         user = users.get_current_user()
@@ -325,19 +368,26 @@ class update_League(webapp2.RequestHandler):
         snake = self.request.get('snake_draft') == 'on'
 
         if not current_league or current_league.draft_current_position == 0:
-            if name != globals.draft_started_sentinel:
-                #Create/Update the league
-                new_league = League.get_or_insert(commissioner_account_key.id())
-                new_league.name = name
-                new_league.snake_draft = snake
-                new_league.draft_current_position = 0
-                new_league.put()
+            #Create/Update the league
+            new_league = League.get_or_insert(commissioner_account_key.id())
+            new_league.name = name
+            new_league.snake_draft = snake
+            new_league.draft_current_position = 0
+            new_league.put()
 
-                add_to_league(user.user_id(), new_league.key.id())
+            add_to_league(user.user_id(), new_league.key.id())
 
             self.redirect('/')
         else:
             globals.display_error_page(self, self.request.referer, error_messages.league_already_started_leaving)
+
+    def handle_exception(self, exception, debug_mode):
+        if debug_mode:
+            super(type(self), self).handle_exception(exception, debug_mode)
+        else:
+            template = JINJA_ENVIRONMENT.get_template('templates/500.html')
+            self.response.write(template.render())
+
 
 class leave_League(webapp2.RequestHandler):
     """
@@ -352,6 +402,12 @@ class leave_League(webapp2.RequestHandler):
         else:
             globals.display_error_page(self, self.request.referer, error_messages.league_already_started_leaving)
 
+    def handle_exception(self, exception, debug_mode):
+        if debug_mode:
+            super(type(self), self).handle_exception(exception, debug_mode)
+        else:
+            template = JINJA_ENVIRONMENT.get_template('templates/500.html')
+            self.response.write(template.render())
 
 
 class Join_League(webapp2.RequestHandler):
@@ -372,12 +428,103 @@ class Join_League(webapp2.RequestHandler):
         else:
             globals.display_error_page(self, self.request.referer, error_messages.league_already_started_leaving)
 
+    def handle_exception(self, exception, debug_mode):
+        if debug_mode:
+            super(type(self), self).handle_exception(exception, debug_mode)
+        else:
+            template = JINJA_ENVIRONMENT.get_template('templates/500.html')
+            self.response.write(template.render())
+
+
+class manage_league(webapp2.RequestHandler):
+    def get(self):
+        """
+            Allows deletion of a league and the modification of settings
+        """
+        # Checks for active Google account session
+        user = users.get_current_user()
+
+        logout_url = users.create_logout_url('/')
+
+        account = globals.get_or_create_account(user)
+        league_id = account.league
+
+        if league_id == account.key.id():
+            if league_id != '0':
+                league_name = league_key(league_id).get().name
+            else:
+                league_name = ""
+
+            #Send html data to browser
+            template_values = {
+                            'user': user.nickname(),
+                            'logout_url': logout_url,
+                            'league_name': league_name,
+                            'draft_state': globals.get_draft_state(account),
+                            'snake_draft': league_key(league_id).get().snake_draft
+                            }
+            template = JINJA_ENVIRONMENT.get_template('templates/manage_league.html')
+            self.response.write(template.render(template_values))
+        else:
+            globals.display_error_page(self, self.request.referer,error_messages.access_denied)
+
+    def handle_exception(self, exception, debug_mode):
+        if debug_mode:
+            super(type(self), self).handle_exception(exception, debug_mode)
+        else:
+            template = JINJA_ENVIRONMENT.get_template('templates/500.html')
+            self.response.write(template.render())
+
+
+class delete_League(webapp2.RequestHandler):
+    """
+        The post handler for the deletion of leagues
+    """
+    def get(self):
+        user = users.get_current_user()
+        account = globals.get_or_create_account(user)
+
+        league = league_key(account.league).get()
+        league_id = league.key.id()
+
+        commissioner_account_id = league.key.id()
+
+        if account.key.id() == commissioner_account_id:
+            #Only the commissioner may delete a league
+            league_player_query = Account.query(Account.league == league_id)
+            league_players = league_player_query.fetch()
+            for player in league_players:
+                remove_from_league_indiscriminately(player.key.id())  # We can only do this because we're about to destroy the league
+            league.key.delete()
+
+            self.redirect('/')
+        else:
+            globals.display_error_page(self, self.request.referer, error_messages.access_denied)
+
+    def handle_exception(self, exception, debug_mode):
+        if debug_mode:
+            super(type(self), self).handle_exception(exception, debug_mode)
+        else:
+            template = JINJA_ENVIRONMENT.get_template('templates/500.html')
+            self.response.write(template.render())
+
+
+class PageNotFoundHandler(webapp2.RequestHandler):
+    def get(self):
+        self.error(404)
+        template = JINJA_ENVIRONMENT.get_template('templates/404.html')
+        self.response.write(template.render())
+
+
 application = webapp2.WSGIApplication([
                                        ('/leagueManagement/updateLeague', update_League),
                                        ('/leagueManagement/createLeague', create_League),
                                        ('/leagueManagement/showLeagues', Show_Leagues),
-                                        ('/leagueManagement/joinLeague/(.*)', Join_League),
-                                       ('/leagueManagement/leaveLeague', leave_League)
+                                       ('/leagueManagement/joinLeague/(.*)', Join_League),  # The id of the league
+                                       ('/leagueManagement/leaveLeague', leave_League),
+                                       ('/leagueManagement/manageLeague', manage_league),
+                                       ('/leagueManagement/deleteLeague', delete_League),
+                                       ('/leagueManagement/.*', PageNotFoundHandler)
                                        ], debug=True)
 
 def main():
@@ -389,3 +536,4 @@ if __name__ == "__main__":
 
 #Down here to fix import bug
 from points import get_total_week_points, get_person_total_points, get_bench_points
+import globals

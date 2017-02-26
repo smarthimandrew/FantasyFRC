@@ -6,8 +6,6 @@ import os
 import logging
 import error_messages
 
-import globals
-from globals import maximum_active_teams
 
 from google.appengine.ext.webapp.util import run_wsgi_app
 from google.appengine.api import users
@@ -68,23 +66,28 @@ def get_team_lists(user_id, week_number):
         :parameter week_number: The week to gather data on
         :type str or int
         :return: An array of two arrays(lineup, bench) containing, for each team in the lineup, a dictionary:
-            - number: The name of the event (int)
+            - number: The number of the team (int)
             - detail_url: A link to the team's individual page (string)
             - schedule: An array containing scheduling data (schedule) (See get_team_schedule())
             - total_points: The number of points(our system) this team scored in total.  (int)
-                If week_number is editable, this is actually the points scored this week, not total
+                If week_number is not editable, this is actually the points scored this week, not total
             - disabled: Is 'True' if team is locked because of good performance (string(bool))
         For each team in the bench list, the dictionary contains the following:
-            - number: The name of the event (int)
+            - number: The number of the team (int)
             - total_points: The number of points(our system) this team scored in total.  (int)
-                If week_number is editable, this is actually the points scored this week, not total
+                If week_number not is editable, this is actually the points scored this week, not total
             - disabled: Is 'True' if team is locked because of good performance (string(bool))
     """
     account = account_key(user_id).get()
     choice = choice_key(account.key, account.league).get()
-    roster = choice.current_team_roster
 
-    active_lineup = lineup_key(choice_key(account.key, account.league), week_number).get().active_teams
+    lineup = lineup_key(choice_key(account.key, account.league), week_number).get()
+    active_lineup = lineup.active_teams
+
+    if week_number < globals.get_current_editable_week():
+        roster = lineup.weekly_roster
+    else:
+        roster = choice.current_team_roster
 
     current_lineup = []
     for number in active_lineup:
@@ -174,7 +177,7 @@ def get_top_teams(number):
 
 def is_week_editable(week_number):
     """Return if the week is editable or not"""
-    return globals.debug_current_editable_week <= int(week_number)
+    return globals.get_current_editable_week() <= int(week_number)
 
 
 class alliance_portal(webapp2.RequestHandler):
@@ -205,10 +208,7 @@ class alliance_portal(webapp2.RequestHandler):
             if draft_over:
                 #Proccess league info
                 if league_id != '0':
-                    if league_key(league_id).get().draft_current_position == 0:
-                        league_name = league_key(league_id).get().name
-                    else:
-                        league_name = globals.draft_started_sentinel
+                    league_name = league_key(league_id).get().name
                 else:
                     league_name = ""
 
@@ -239,16 +239,21 @@ class alliance_portal(webapp2.RequestHandler):
 
                 user_schedule = get_readable_user_schedule(user_id)
 
+                watchlist_raw = account.watchlist
+                watch_list = get_watchlist(watchlist_raw)
+
                 template_values = {
                                 'user': user.nickname(),
                                 'logout_url': logout_url,
                                 'league_name': league_name,
+                                'draft_state': globals.get_draft_state(account),
                                 'week_table': week_table,
                                 'total_points': total_points,
                                 'leader_board': leader_board,
                                 'schedule': league_schedule,
                                 'roster': current_roster,
-                                'week_number': globals.debug_current_editable_week,
+                                'watch_list': watch_list,
+                                'week_number': globals.get_current_editable_week(),
                                 'user_schedule': user_schedule
                                 }
 
@@ -258,6 +263,13 @@ class alliance_portal(webapp2.RequestHandler):
                 globals.display_error_page(self, self.request.referer, error_messages.draft_needs_to_be_completed)
         else:
             globals.display_error_page(self, self.request.referer, error_messages.need_to_be_a_member_of_a_league)
+
+    def handle_exception(self, exception, debug_mode):
+        if debug_mode:
+            super(type(self), self).handle_exception(exception, debug_mode)
+        else:
+            template = JINJA_ENVIRONMENT.get_template('templates/500.html')
+            self.response.write(template.render())
 
 
 class update_lineup(webapp2.RequestHandler):
@@ -272,7 +284,6 @@ class update_lineup(webapp2.RequestHandler):
 
             :parameter week_number: Taken from the url, in string form
         """
-        #The choice_key of the request
         action = self.request.get('action')
         team_number = self.request.get('team_number')
 
@@ -291,8 +302,8 @@ class update_lineup(webapp2.RequestHandler):
             roster.append(int(team))
 
         #Only allow changes to the lineup if the week is editable
+        error = False
         if is_week_editable(week_number):
-            error = False
             active_lineup = lineup_key(choice_key(account.key, league_id), week_number).get()
             if action == "bench":
                 active_lineup.active_teams.remove(int(team_number))
@@ -309,12 +320,23 @@ class update_lineup(webapp2.RequestHandler):
                 if not str(team_number) in get_top_teams(globals.number_of_locked_teams):
                     choice = choice_key(account.key, league_id).get()
                     choice.current_team_roster.remove(int(team_number))
-                    if int(team_number) in active_lineup.active_teams:
-                        active_lineup.active_teams.remove(int(team_number))
+
+                    for week_num in range(int(week_number), globals.number_of_official_weeks):
+                        lineup = lineup_key(choice.key, week_num).get()
+                        if int(team_number) in lineup.active_teams:
+                            active_lineup.active_teams.remove(int(team_number))
+
                     choice.put()
             active_lineup.put()
         if not error:
             self.redirect(self.request.referer)
+
+    def handle_exception(self, exception, debug_mode):
+        if debug_mode:
+            super(type(self), self).handle_exception(exception, debug_mode)
+        else:
+            template = JINJA_ENVIRONMENT.get_template('templates/500.html')
+            self.response.write(template.render())
 
 
 class view_alliance(webapp2.RequestHandler):
@@ -338,10 +360,7 @@ class view_alliance(webapp2.RequestHandler):
         draft_over = league_key(league_id).get().draft_current_position == -1
 
         if league_id != '0':
-            if league_key(league_id).get().draft_current_position == 0:
-                league_name = league_key(league_id).get().name
-            else:
-                league_name = globals.draft_started_sentinel
+            league_name = league_key(league_id).get().name
         else:
             league_name = ""
 
@@ -356,12 +375,11 @@ class view_alliance(webapp2.RequestHandler):
 
             opponent_name = ""
             opponent_point_totals = []
-            opponent_team_lists = []
             team_listss = [team_lists]
             if get_opponent(user_id, week_number) != globals.schedule_bye_week:
                 opponent_team_lists = get_team_lists(get_opponent(user_id, week_number), week_number)
                 opponent_point_totals = []
-                for team_list in team_lists:
+                for team_list in opponent_team_lists:
                     opponent_point_total = 0
                     for team in team_list:
                         opponent_point_total += team['total_points']
@@ -376,6 +394,7 @@ class view_alliance(webapp2.RequestHandler):
                             'user': user.nickname(),
                             'logout_url': logout_url,
                             'league_name': league_name,
+                            'draft_state': globals.get_draft_state(account),
                             'week_number': int(week_number),
                             'point_totals': [point_totals, opponent_point_totals],
                             'team_listss': team_listss,
@@ -389,6 +408,13 @@ class view_alliance(webapp2.RequestHandler):
             self.response.write(template.render(template_values))
         else:
             globals.display_error_page(self, self.request.referer, error_messages.draft_needs_to_be_completed)
+
+    def handle_exception(self, exception, debug_mode):
+        if debug_mode:
+            super(type(self), self).handle_exception(exception, debug_mode)
+        else:
+            template = JINJA_ENVIRONMENT.get_template('templates/500.html')
+            self.response.write(template.render())
 
 
 class team_detail_page(webapp2.RequestHandler):
@@ -412,10 +438,7 @@ class team_detail_page(webapp2.RequestHandler):
         league_id = account.league
 
         if league_id != '0':
-            if league_key(league_id).get().draft_current_position == 0:
-                league_name = league_key(league_id).get().name
-            else:
-                league_name = globals.draft_started_sentinel
+            league_name = league_key(league_id).get().name
         else:
             league_name = ""
 
@@ -465,6 +488,7 @@ class team_detail_page(webapp2.RequestHandler):
                         'user': user.nickname(),
                         'logout_url': logout_url,
                         'league_name': league_name,
+                        'draft_state': globals.get_draft_state(account),
                         'team_data': team_data,
                         'team_name': team_name,
                         'tba_team_url': tba_team_url,
@@ -473,11 +497,26 @@ class team_detail_page(webapp2.RequestHandler):
         template = JINJA_ENVIRONMENT.get_template('templates/team_detail.html')
         self.response.write(template.render(template_values))
 
+    def handle_exception(self, exception, debug_mode):
+        if debug_mode:
+            super(type(self), self).handle_exception(exception, debug_mode)
+        else:
+            template = JINJA_ENVIRONMENT.get_template('templates/500.html')
+            self.response.write(template.render())
+
+
+class PageNotFoundHandler(webapp2.RequestHandler):
+    def get(self):
+        self.error(404)
+        template = JINJA_ENVIRONMENT.get_template('templates/404.html')
+        self.response.write(template.render())
+
 
 application = webapp2.WSGIApplication([('/allianceManagement/viewAlliance', alliance_portal),
-                                       ('/allianceManagement/viewAlliance/(.*)', view_alliance),  # Team number
-                                       ('/allianceManagement/updateLineup/(.*)', update_lineup),  # Team number
+                                       ('/allianceManagement/viewAlliance/(.*)', view_alliance),  # Week number
+                                       ('/allianceManagement/updateLineup/(.*)', update_lineup),  # Week number
                                        ('/allianceManagement/teamDetail/(.*)', team_detail_page),  # Team number
+                                       ('/allianceManagement/.*', PageNotFoundHandler)
                                        ], debug=True)
 
 
@@ -492,3 +531,6 @@ if __name__ == "__main__":
 from points import get_team_points_at_event, get_points_to_date, get_point_breakdown_display, \
     humman_readable_point_categories, explanation_of_point_categories
 from league_management import get_leader_board, get_readable_schedule, get_opponent, get_opponent_name, get_readable_user_schedule
+from drafting import get_watchlist
+from globals import maximum_active_teams
+import globals
